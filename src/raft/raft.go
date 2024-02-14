@@ -126,6 +126,8 @@ func (rf *Raft) persist() {
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		Debug(dInfo, "Initial persisted state is empty")
 		return
@@ -168,11 +170,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.log = rf.log[index-rf.lastIncludedIndex-1:]
 		rf.lastIncludedIndex = index - 1
 		rf.snapshot = snapshot
-		for i := range rf.peers {
-			if i == rf.me {
-				continue
+		if rf.role == Leader {
+			for i := range rf.peers {
+				if i == rf.me {
+					continue
+				}
+				rf.replicatorCond[i].Signal()
 			}
-			rf.replicatorCond[i].Signal()
 		}
 	}
 }
@@ -297,9 +301,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			Debug(dLog, "S%d T:%d logReplication failed: Can not find PrevLogIndex(%d) in log(length: %d)", rf.me, rf.currentTerm, args.PrevLogIndex, len(rf.log)+rf.lastIncludedIndex)
 			return
 		}
+		if args.PrevLogIndex < rf.lastIncludedIndex {
+			reply.Success, reply.Term, reply.NextIndex = true, rf.currentTerm, -1
+			return
+		}
 		if rf.log[args.PrevLogIndex-rf.lastIncludedIndex].Term != args.PrevLogTerm {
 			nextIndex := args.PrevLogIndex
-			for nextIndex > 0 && rf.log[nextIndex-rf.lastIncludedIndex].Term == rf.log[args.PrevLogIndex-rf.lastIncludedIndex].Term {
+			for nextIndex-rf.lastIncludedIndex > 0 && rf.log[nextIndex-rf.lastIncludedIndex].Term == rf.log[args.PrevLogIndex-rf.lastIncludedIndex].Term {
 				nextIndex--
 			}
 			reply.Success, reply.Term, reply.NextIndex = false, rf.currentTerm, nextIndex+1
@@ -530,6 +538,7 @@ func (rf *Raft) startElection(currentTerm int, lastLogIndex int, lastLogTerm int
 			for i := range rf.matchIndex {
 				rf.matchIndex[i] = 0
 			}
+			rf.matchIndex[rf.me] = len(rf.log) - 1 + rf.lastIncludedIndex
 			rf.mu.Unlock()
 			break
 		}
@@ -553,6 +562,7 @@ func (rf *Raft) replicator(server int) {
 		var snapshot []byte
 		for {
 			rf.mu.RLock()
+			Debug(dLeader, "S%d T:%d lastIncludedIndex is %d, S%d's nextIndex is %d", rf.me, rf.currentTerm, rf.lastIncludedIndex, server, rf.nextIndex[server])
 			if rf.role == Leader && rf.lastIncludedIndex >= rf.nextIndex[server] {
 				currentTerm = rf.currentTerm
 				lastIncludedIndex = rf.lastIncludedIndex
@@ -674,7 +684,9 @@ func (rf *Raft) heartbeatTicker() {
 				if prevLogIndex < rf.lastIncludedIndex {
 					prevLogIndex = rf.lastIncludedIndex
 					prevLogTerm = rf.log[0].Term
-					rf.replicatorCond[i].Signal()
+					snapshot := make([]byte, len(rf.snapshot))
+					copy(snapshot, rf.snapshot)
+					go rf.snapshotInstallation(i, currentTerm, rf.lastIncludedIndex, rf.log[0].Term, snapshot)
 				} else {
 					prevLogTerm = rf.log[prevLogIndex-rf.lastIncludedIndex].Term
 					entries = append(entries, rf.log[prevLogIndex+1-rf.lastIncludedIndex:]...)
@@ -701,7 +713,7 @@ func (rf *Raft) applier() {
 				copy(matchIndex, rf.matchIndex)
 				sort.Sort(sort.Reverse(sort.IntSlice(matchIndex)))
 				for i := len(rf.peers) / 2; i < len(matchIndex); i++ {
-					if matchIndex[i] > rf.commitIndex && rf.log[matchIndex[i]-rf.lastIncludedIndex].Term == rf.currentTerm {
+					if matchIndex[i] > rf.commitIndex && matchIndex[i] > rf.lastIncludedIndex && rf.log[matchIndex[i]-rf.lastIncludedIndex].Term == rf.currentTerm {
 						rf.commitIndex = matchIndex[i]
 						Debug(dCommit, "S%d: SET commitIndex=%d", rf.me, rf.commitIndex)
 						break
