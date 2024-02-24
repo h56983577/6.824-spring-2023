@@ -1,4 +1,4 @@
-package raft
+package kvraft
 
 import (
 	"fmt"
@@ -54,7 +54,7 @@ func init() {
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
-	if debugVerbosity&0b1 > 0 {
+	if debugVerbosity&0b10 > 0 {
 		time := time.Since(debugStart).Microseconds()
 		time /= 100
 		prefix := fmt.Sprintf("%06d %v ", time, string(topic))

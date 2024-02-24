@@ -562,7 +562,6 @@ func (rf *Raft) replicator(server int) {
 		var snapshot []byte
 		for {
 			rf.mu.RLock()
-			Debug(dLeader, "S%d T:%d lastIncludedIndex is %d, S%d's nextIndex is %d", rf.me, rf.currentTerm, rf.lastIncludedIndex, server, rf.nextIndex[server])
 			if rf.role == Leader && rf.lastIncludedIndex >= rf.nextIndex[server] {
 				currentTerm = rf.currentTerm
 				lastIncludedIndex = rf.lastIncludedIndex
